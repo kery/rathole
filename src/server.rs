@@ -5,8 +5,8 @@ use crate::helper::{retry_notify_with_deadline, write_and_flush};
 use crate::multi_map::MultiMap;
 use crate::protocol::Hello::{ControlChannelHello, DataChannelHello};
 use crate::protocol::{
-    self, read_auth, read_hello, Ack, ControlChannelCmd, DataChannelCmd, Hello, UdpTraffic,
-    HASH_WIDTH_IN_BYTES,
+    self, read_auth, read_hello, Ack, ControlChannelCmd, DataChannelCmd, Hello, SocksForwardTarget,
+    UdpTraffic, HASH_WIDTH_IN_BYTES,
 };
 use crate::transport::{SocketOpts, TcpTransport, Transport};
 use anyhow::{anyhow, bail, Context, Result};
@@ -415,7 +415,7 @@ where
 
         // Cache some data channels for later use
         let pool_size = match service.service_type {
-            ServiceType::Tcp => TCP_POOL_SIZE,
+            ServiceType::Tcp | ServiceType::Socks => TCP_POOL_SIZE,
             ServiceType::Udp => UDP_POOL_SIZE,
         };
 
@@ -438,6 +438,22 @@ where
                     )
                     .await
                     .with_context(|| "Failed to run TCP connection pool")
+                    {
+                        error!("{:#}", e);
+                    }
+                }
+                .instrument(Span::current()),
+            ),
+            ServiceType::Socks => tokio::spawn(
+                async move {
+                    if let Err(e) = run_socks_tcp_connection_pool::<T>(
+                        bind_addr,
+                        data_ch_rx,
+                        data_ch_req_tx,
+                        shutdown_rx_clone,
+                    )
+                    .await
+                    .with_context(|| "Failed to run SOCKS connection pool")
                     {
                         error!("{:#}", e);
                     }
@@ -620,6 +636,114 @@ fn tcp_listen_and_send(
     }.instrument(Span::current()));
 
     rx
+}
+
+/// Like `tcp_listen_and_send`, but runs SOCKS5 handshake before requesting a data channel.
+fn socks_listen_and_send(
+    addr: String,
+    data_ch_req_tx: mpsc::UnboundedSender<bool>,
+    mut shutdown_rx: broadcast::Receiver<bool>,
+) -> mpsc::Receiver<(TcpStream, SocksForwardTarget)> {
+    let (tx, rx) = mpsc::channel(CHAN_SIZE);
+
+    tokio::spawn(async move {
+        let l = retry_notify_with_deadline(listen_backoff(),  || async {
+            Ok(TcpListener::bind(&addr).await?)
+        }, |e, duration| {
+            error!("{:#}. Retry in {:?}", e, duration);
+        }, &mut shutdown_rx).await
+        .with_context(|| "Failed to listen for the SOCKS service");
+
+        let l: TcpListener = match l {
+            Ok(v) => v,
+            Err(e) => {
+                error!("{:#}", e);
+                return;
+            }
+        };
+
+        info!("Listening for SOCKS5 at {}", &addr);
+
+        let mut backoff = ExponentialBackoff {
+            max_interval: Duration::from_secs(1),
+            max_elapsed_time: None,
+            ..Default::default()
+        };
+
+        loop {
+            tokio::select! {
+                val = l.accept() => {
+                    match val {
+                        Err(e) => {
+                            error!("{}. Sleep for a while", e);
+                            if let Some(d) = backoff.next_backoff() {
+                                time::sleep(d).await;
+                            } else {
+                                error!("Too many retries. Aborting...");
+                                break;
+                            }
+                        }
+                        Ok((mut incoming, addr)) => {
+                            match crate::socks::server_handshake(&mut incoming).await {
+                                Ok(target) => {
+                                    if data_ch_req_tx.send(true).with_context(|| "Failed to send data chan create request").is_err() {
+                                        break;
+                                    }
+                                    backoff.reset();
+                                    debug!("SOCKS CONNECT from {}", addr);
+                                    let _ = tx.send((incoming, target)).await;
+                                }
+                                Err(e) => {
+                                    debug!("SOCKS handshake from {} failed: {:#}", addr, e);
+                                }
+                            }
+                        }
+                    }
+                },
+                _ = shutdown_rx.recv() => {
+                    break;
+                }
+            }
+        }
+
+        info!("SOCKS TCPListener shutdown");
+    }.instrument(Span::current()));
+
+    rx
+}
+
+#[instrument(skip_all)]
+async fn run_socks_tcp_connection_pool<T: Transport>(
+    bind_addr: String,
+    mut data_ch_rx: mpsc::Receiver<T::Stream>,
+    data_ch_req_tx: mpsc::UnboundedSender<bool>,
+    shutdown_rx: broadcast::Receiver<bool>,
+) -> Result<()> {
+    let mut visitor_rx = socks_listen_and_send(bind_addr, data_ch_req_tx.clone(), shutdown_rx);
+    let cmd = bincode::serialize(&DataChannelCmd::StartForwardSocks).unwrap();
+
+    'pool: while let Some((mut visitor, target)) = visitor_rx.recv().await {
+        loop {
+            if let Some(mut ch) = data_ch_rx.recv().await {
+                if write_and_flush(&mut ch, &cmd).await.is_ok() {
+                    if target.write(&mut ch).await.is_ok() {
+                        tokio::spawn(async move {
+                            let _ = copy_bidirectional(&mut ch, &mut visitor).await;
+                        });
+                        break;
+                    }
+                }
+                if data_ch_req_tx.send(true).is_err() {
+                    break 'pool;
+                }
+            } else {
+                break 'pool;
+            }
+        }
+    }
+
+    info!("Shutdown");
+    Ok(())
 }
 
 #[instrument(skip_all)]

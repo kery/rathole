@@ -1,0 +1,7 @@
+[server]
+bind_addr = "0.0.0.0:2333"
+
+[server.services.socks]
+type = "socks"
+token = "123"
+bind_addr = "0.0.0.0:1080"

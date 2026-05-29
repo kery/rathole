@@ -4,7 +4,7 @@ use crate::helper::udp_connect;
 use crate::protocol::Hello::{self, *};
 use crate::protocol::{
     self, read_ack, read_control_cmd, read_data_cmd, read_hello, Ack, Auth, ControlChannelCmd,
-    DataChannelCmd, UdpTraffic, CURRENT_PROTO_VERSION, HASH_WIDTH_IN_BYTES,
+    DataChannelCmd, SocksForwardTarget, UdpTraffic, CURRENT_PROTO_VERSION, HASH_WIDTH_IN_BYTES,
 };
 use crate::transport::{AddrMaybeCached, SocketOpts, TcpTransport, Transport};
 use anyhow::{anyhow, bail, Context, Result};
@@ -228,6 +228,14 @@ async fn run_data_channel<T: Transport>(args: Arc<RunDataChannelArgs<T>>) -> Res
                 bail!("Expect UDP traffic. Please check the configuration.")
             }
             run_data_channel_for_udp::<T>(conn, &args.service.local_addr, args.service.prefer_ipv6).await?;
+        }
+        DataChannelCmd::StartForwardSocks => {
+            if args.service.service_type != ServiceType::Socks {
+                bail!("Expect SOCKS dynamic forward. Please check the configuration.")
+            }
+            let target = SocksForwardTarget::read(&mut conn).await?;
+            let addr = crate::socks::target_to_connect_addr(&target)?;
+            run_data_channel_for_tcp::<T>(conn, &addr).await?;
         }
     }
     Ok(())

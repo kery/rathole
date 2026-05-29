@@ -130,7 +130,7 @@ remote_public_key = "key_encoded_in_base64" # Optional
 tls = true # If `true` then it will use settings in `client.transport.tls`
 
 [client.services.service1] # A service that needs forwarding. The name `service1` can change arbitrarily, as long as identical to the name in the server's configuration
-type = "tcp" # Optional. The protocol that needs forwarding. Possible values: ["tcp", "udp"]. Default: "tcp"
+type = "tcp" # Optional. The protocol that needs forwarding. Possible values: ["tcp", "udp", "socks"]. Default: "tcp"
 token = "whatever" # Necessary if `client.default_token` not set
 local_addr = "127.0.0.1:1081" # Necessary. The address of the service that needs to be forwarded
 nodelay = true # Optional. Determine whether to enable TCP_NODELAY for data transmission, if applicable, to improve the latency but decrease the bandwidth. Default: true
@@ -173,6 +173,14 @@ nodelay = true # Optional. Same as the client
 [server.services.service2]
 bind_addr = "0.0.0.1:8082"
 ```
+
+### SOCKS 动态转发（类似 SSH `DynamicForward`）
+
+将 `type` 设为 `socks` 时，服务端在 `bind_addr` 上提供 **SOCKS5** 代理（仅支持无认证与 `CONNECT`）。访问者通过 SOCKS 指定的目标地址，由 **客户端所在网络** 发起 TCP 连接（域名在客户端解析），适用于在公网入口做动态出口，而非固定 `local_addr` 转发。
+
+- 客户端 **不需要** 配置 `local_addr`。
+- 服务端与客户端的 `type` 均须为 `socks`，且服务名、token 一致。
+- 完整示例见 [`examples/socks/`](./examples/socks/)。
 
 ### Logging
 

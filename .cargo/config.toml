@@ -1,0 +1,5 @@
+# libgit2 (via build-deps: vergen + git2) calls AdvAPI32 (token/sid/crypto/registry).
+# Some libgit2-sys versions do not pass advapi32 to the linker for the build script
+# executable on MSVC, causing LNK2019 unresolved externals. Link it explicitly.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-l", "advapi32"]

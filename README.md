@@ -132,7 +132,7 @@ remote_public_key = "key_encoded_in_base64" # Optional
 tls = true # If `true` then it will use settings in `client.transport.tls`
 
 [client.services.service1] # A service that needs forwarding. The name `service1` can change arbitrarily, as long as identical to the name in the server's configuration
-type = "tcp" # Optional. The protocol that needs forwarding. Possible values: ["tcp", "udp"]. Default: "tcp"
+type = "tcp" # Optional. The protocol that needs forwarding. Possible values: ["tcp", "udp", "socks"]. Default: "tcp"
 token = "whatever" # Necessary if `client.default_token` not set
 local_addr = "127.0.0.1:1081" # Necessary. The address of the service that needs to be forwarded
 nodelay = true # Optional. Override the `client.transport.nodelay` per service
@@ -175,6 +175,14 @@ nodelay = true # Optional. Same as the client
 [server.services.service2]
 bind_addr = "0.0.0.1:8082"
 ```
+
+### SOCKS dynamic forward
+
+With `type = "socks"`, the server exposes a **SOCKS5** endpoint on `bind_addr` (no authentication, `CONNECT` only). Each visitor chooses a destination; the **client** opens the TCP connection from its own network (DNS for domain names happens on the client). Use this for a dynamic egress similar to SSH `DynamicForward`, instead of a fixed `local_addr` forward.
+
+- The client does **not** need `local_addr` for SOCKS services.
+- Both ends must use `type = "socks"` with the same service name and token.
+- See [`examples/socks/`](./examples/socks/) for a minimal example.
 
 ### Logging
 

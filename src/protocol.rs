@@ -56,6 +56,79 @@ pub enum ControlChannelCmd {
 pub enum DataChannelCmd {
     StartForwardTcp,
     StartForwardUdp,
+    /// Dynamic forward: client connects to a target chosen per connection (SOCKS5 CONNECT).
+    StartForwardSocks,
+}
+
+/// SOCKS5-style address block sent on the data channel after `StartForwardSocks`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SocksForwardTarget {
+    pub atyp: u8,
+    pub addr: Vec<u8>,
+    pub port: u16,
+}
+
+const ATYP_IPV4: u8 = 1;
+const ATYP_DOMAIN: u8 = 3;
+const ATYP_IPV6: u8 = 4;
+
+impl SocksForwardTarget {
+    pub async fn write<T: AsyncWrite + Unpin>(&self, w: &mut T) -> Result<()> {
+        w.write_u8(self.atyp).await?;
+        match self.atyp {
+            ATYP_IPV4 => {
+                if self.addr.len() != 4 {
+                    bail!("SocksForwardTarget: ipv4 must be 4 bytes");
+                }
+                w.write_all(&self.addr).await?;
+            }
+            ATYP_DOMAIN => {
+                let len: u8 = self.addr.len().try_into().map_err(|_| {
+                    anyhow::Error::msg("SocksForwardTarget: domain too long")
+                })?;
+                w.write_u8(len).await?;
+                w.write_all(&self.addr).await?;
+            }
+            ATYP_IPV6 => {
+                if self.addr.len() != 16 {
+                    bail!("SocksForwardTarget: ipv6 must be 16 bytes");
+                }
+                w.write_all(&self.addr).await?;
+            }
+            _ => bail!("SocksForwardTarget: invalid atyp {}", self.atyp),
+        }
+        w.write_u16(self.port).await?;
+        w.flush().await?;
+        Ok(())
+    }
+
+    pub async fn read<T: AsyncRead + Unpin>(r: &mut T) -> Result<Self> {
+        let atyp = r.read_u8().await?;
+        let addr = match atyp {
+            ATYP_IPV4 => {
+                let mut v = vec![0u8; 4];
+                r.read_exact(&mut v).await?;
+                v
+            }
+            ATYP_DOMAIN => {
+                let len = r.read_u8().await? as usize;
+                if len == 0 {
+                    bail!("SocksForwardTarget: empty domain");
+                }
+                let mut v = vec![0u8; len];
+                r.read_exact(&mut v).await?;
+                v
+            }
+            ATYP_IPV6 => {
+                let mut v = vec![0u8; 16];
+                r.read_exact(&mut v).await?;
+                v
+            }
+            _ => bail!("SocksForwardTarget: invalid atyp {}", atyp),
+        };
+        let port = r.read_u16().await?;
+        Ok(Self { atyp, addr, port })
+    }
 }
 
 type UdpPacketLen = u16; // `u16` should be enough for any practical UDP traffic on the Internet
@@ -156,7 +229,14 @@ impl PacketLength {
             .unwrap() as usize;
         let c_cmd =
             bincode::serialized_size(&ControlChannelCmd::CreateDataChannel).unwrap() as usize;
-        let d_cmd = bincode::serialized_size(&DataChannelCmd::StartForwardTcp).unwrap() as usize;
+        let d_cmd = [
+            bincode::serialized_size(&DataChannelCmd::StartForwardTcp).unwrap(),
+            bincode::serialized_size(&DataChannelCmd::StartForwardUdp).unwrap(),
+            bincode::serialized_size(&DataChannelCmd::StartForwardSocks).unwrap(),
+        ]
+        .into_iter()
+        .max()
+        .unwrap() as usize;
         let ack = Ack::Ok;
         let ack = bincode::serialized_size(&ack).unwrap() as usize;
 

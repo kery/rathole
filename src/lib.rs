@@ -5,6 +5,7 @@ mod constants;
 mod helper;
 mod multi_map;
 mod protocol;
+mod socks;
 mod transport;
 
 pub use cli::Cli;

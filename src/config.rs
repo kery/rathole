@@ -62,6 +62,8 @@ pub struct ClientServiceConfig {
     pub service_type: ServiceType,
     #[serde(skip)]
     pub name: String,
+    /// Required for `tcp` and `udp`. Ignored for `socks` (dynamic forward).
+    #[serde(default)]
     pub local_addr: String,
     #[serde(default)] // Default to false
     pub prefer_ipv6: bool,
@@ -86,6 +88,8 @@ pub enum ServiceType {
     Tcp,
     #[serde(rename = "udp")]
     Udp,
+    #[serde(rename = "socks")]
+    Socks,
 }
 
 fn default_service_type() -> ServiceType {
@@ -284,6 +288,14 @@ impl Config {
             }
             if s.retry_interval.is_none() {
                 s.retry_interval = Some(client.retry_interval);
+            }
+            match s.service_type {
+                ServiceType::Tcp | ServiceType::Udp => {
+                    if s.local_addr.is_empty() {
+                        bail!("The local_addr of service {} is not set", name);
+                    }
+                }
+                ServiceType::Socks => {}
             }
         }
 
